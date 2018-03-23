@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/lwithers/mkhex/hexconv"
 	"github.com/lwithers/pkg/writefile"
@@ -62,8 +65,9 @@ func vimRun(c *cobra.Command, args []string) error {
 	fin.Close()
 
 	// modify temporary file
+	var editorError error
 	for {
-		if err := vimLaunch(c, tmpf.Name()); err != nil {
+		if err := vimLaunch(c, tmpf.Name(), editorError); err != nil {
 			FatalErrorf("failed to launch editor: %v", err)
 		}
 
@@ -94,8 +98,7 @@ func vimRun(c *cobra.Command, args []string) error {
 
 		// abort conversion, send back to editor
 		writefile.Abort(fout)
-
-		// TODO — notify user of errors
+		editorError = err
 	}
 }
 
@@ -104,7 +107,7 @@ func vimFindExec(plain string) error {
 	return err
 }
 
-func vimLaunch(c *cobra.Command, hexfile string) error {
+func vimLaunch(c *cobra.Command, hexfile string, editorError error) error {
 	// find an editor
 	var editor string
 	switch {
@@ -120,15 +123,65 @@ func vimLaunch(c *cobra.Command, hexfile string) error {
 		editor = "nano"
 	}
 
-	// TODO: if vim, build an error list file; else display errors on stderr
-	// and prompt user
-
 	// build the command
 	cmd := exec.Command(editor, hexfile)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// display errors to user if necessary
+	if editorError != nil {
+		var qffile string
+		if filepath.Base(editor) == "vim" {
+			qffile = vimQuickfix(editorError, hexfile)
+		}
+		if qffile != "" {
+			cmd.Args = cmd.Args[:len(cmd.Args)-1] // strip file
+			cmd.Args = append(cmd.Args, "-c")
+			cmd.Args = append(cmd.Args, "set errorformat=%f:%l:%c:%m")
+			cmd.Args = append(cmd.Args, "-c")
+			cmd.Args = append(cmd.Args, ":copen 10")
+			cmd.Args = append(cmd.Args, "-c")
+			cmd.Args = append(cmd.Args, ":cc1")
+			cmd.Args = append(cmd.Args, "-q")
+			cmd.Args = append(cmd.Args, qffile)
+			defer os.Remove(qffile)
+		} else {
+			// display to user, prompt
+			fmt.Printf("*** Errors in conversion:\n%v\n"+
+				"Press Enter to continue.\n", editorError)
+			scanner := bufio.NewScanner(os.Stdin)
+			scanner.Scan()
+		}
+	}
+
 	// run the command
 	return cmd.Run()
+}
+
+func vimQuickfix(editorError error, hexfile string) string {
+	qftmp, err := ioutil.TempFile("", "mkhex-quickfix")
+	if err != nil {
+		return ""
+	}
+
+	if cc, ok := editorError.(hexconv.ConvErrors); ok {
+		for _, c := range cc {
+			if co, ok := c.(*hexconv.ConvErr); ok {
+				fmt.Fprintf(qftmp, "%s:%d:%d:%s\n",
+					hexfile, co.Line, co.Col, co.Err)
+			} else {
+				fmt.Fprintf(qftmp, "%s:1:1:%s\n",
+					hexfile, c)
+			}
+		}
+	} else {
+		fmt.Fprintf(qftmp, "%s:1:1:%s\n", hexfile, editorError)
+	}
+
+	if err = qftmp.Close(); err != nil {
+		os.Remove(qftmp.Name())
+		return ""
+	}
+	return qftmp.Name()
 }

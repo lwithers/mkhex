@@ -10,7 +10,22 @@ import (
 	"strings"
 )
 
-// TODO: error type representing multiple errors is required
+const (
+	// MaxErrors is the maximum number of errors to return if a conversion
+	// fails.
+	MaxErrors = 10
+)
+
+// ConvErrors is the set of errors encountered during a conversion.
+type ConvErrors []error
+
+func (cc ConvErrors) Error() string {
+	cstr := make([]string, 0, len(cc))
+	for _, c := range cc {
+		cstr = append(cstr, c.Error())
+	}
+	return strings.Join(cstr, "\n")
+}
 
 // ConvErr is returned if a conversion error occurs. This can only occur when
 // converting from the textual hexadecimal representation back to binary.
@@ -37,11 +52,7 @@ func HexToBin(in io.Reader, out io.Writer) error {
 		return io
 	}
 	if len(conv) > 0 {
-		cstr := make([]string, 0, len(conv))
-		for _, c := range conv {
-			cstr = append(cstr, c.Error())
-		}
-		return errors.New(strings.Join(cstr, "\n"))
+		return ConvErrors(conv)
 	}
 	return nil
 }
@@ -64,7 +75,7 @@ func hexToBinaryAux(in io.Reader, out io.Writer) (conv []error, io error) {
 				cerr.Line = line
 			}
 			conv = append(conv, err)
-			if len(conv) >= 10 {
+			if len(conv) >= MaxErrors {
 				return
 			}
 		} else if _, err = bout.Write(b); err != nil {
